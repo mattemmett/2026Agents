@@ -1,0 +1,27 @@
+# ---- Core agent runtime ----
+langchain-core>=0.3.10
+langgraph>=0.4.5
+
+# Optional but common LangChain integrations
+langchain-community>=0.3.10
+
+# ---- LLM providers (install now, configure later) ----
+openai>=1.12
+anthropic>=0.30
+
+# ---- Observability / tracing ----
+langfuse>=2.40
+opentelemetry-sdk>=1.27
+opentelemetry-exporter-otlp>=1.27
+
+# ---- Vector DB ----
+weaviate-client>=4.7
+
+# ---- Infra clients ----
+psycopg[binary]>=3.2
+redis>=5.0
+
+# ---- Utilities ----
+python-dotenv>=1.0
+pydantic>=2.8
+rich>=13.8

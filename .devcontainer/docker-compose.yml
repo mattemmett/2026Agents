@@ -1,0 +1,59 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    volumes:
+      - ..:/workspaces/2026Agents:cached
+    depends_on:
+      - postgres
+      - redis
+      - weaviate
+    environment:
+      # App connection strings (use service names, not localhost)
+      DATABASE_URL: postgresql://agentic:agentic@postgres:5432/agentic
+      REDIS_URL: redis://redis:6379/0
+      WEAVIATE_URL: http://weaviate:8080
+    ports:
+      - "8000:8000"
+    command: sleep infinity
+
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: agentic
+      POSTGRES_PASSWORD: agentic
+      POSTGRES_DB: agentic
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432"
+
+  redis:
+    image: redis:7
+    volumes:
+      - redisdata:/data
+    ports:
+      - "6379"
+
+  weaviate:
+    image: semitechnologies/weaviate:1.25.5
+    environment:
+      QUERY_DEFAULTS_LIMIT: "25"
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
+      DEFAULT_VECTORIZER_MODULE: "none"
+      ENABLE_MODULES: ""
+      CLUSTER_HOSTNAME: "node1"
+    volumes:
+      - weaviatedata:/var/lib/weaviate
+    ports:
+      - "8080"
+
+volumes:
+  pgdata:
+    name: agentic-${COMPOSE_PROJECT_NAME}-pgdata
+  redisdata:
+    name: agentic-${COMPOSE_PROJECT_NAME}-redis
+  weaviatedata:
+    name: agentic-${COMPOSE_PROJECT_NAME}-weaviate
