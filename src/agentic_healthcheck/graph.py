@@ -1,30 +1,42 @@
+from __future__ import annotations
+
 from langgraph.graph import StateGraph, START, END
-from langsmith import trace
-import requests, psycopg, redis
+import requests
+import psycopg
+import redis
 
 from .state import HealthcheckState
 from .cli import parse_args
 
 
-
+# ----------------------------
+# Planning + routing
+# ----------------------------
 
 def plan_node(state: HealthcheckState) -> HealthcheckState:
-    # A node reads the incoming state...
     goal = state.get("goal", "Check dev services")
-    plan = ["weaviate", "postgres", "redis"]  # machine-friendly names
 
+    all_checks = ["weaviate", "postgres", "redis"]
 
-    # ...and returns only the fields it wants to update.
+    cli = state.get("cli", {}) or {}
+    only = cli.get("only")
+    skip = cli.get("skip")
+
+    if only:
+        plan = [c.strip() for c in only.split(",") if c.strip() in all_checks]
+    else:
+        plan = list(all_checks)
+
+    if skip:
+        skip_set = {c.strip() for c in skip.split(",") if c.strip()}
+        plan = [c for c in plan if c not in skip_set]
+
     return {
         "goal": goal,
-        "plan": [
-            "Check Weaviate",
-            "Check Postgres",
-            "Check Redis",
-            "Summarize results",
-        ],
+        "plan": [f"Check {c.capitalize()}" for c in plan] + ["Summarize results"],
         "todo": plan,
     }
+
 
 def router_node(state: HealthcheckState) -> HealthcheckState:
     todo = list(state.get("todo", []))
@@ -34,16 +46,26 @@ def router_node(state: HealthcheckState) -> HealthcheckState:
     current = todo.pop(0)
     return {"current": current, "todo": todo}
 
+
+def route_from_router(state: HealthcheckState) -> str:
+    current = state.get("current", "")
+    if current in ("weaviate", "postgres", "redis"):
+        return current
+    return "done"
+
+
+# ----------------------------
+# Check nodes (tools)
+# ----------------------------
+
 def weaviate_check_node(state: HealthcheckState) -> HealthcheckState:
-    # Call Weaviate's /meta endpoint (simple, always JSON)
     resp = requests.get("http://weaviate:8080/v1/meta", timeout=3)
     meta = resp.json()
 
-    # Merge into checks (don't overwrite other checks we'll add later)
     checks = dict(state.get("checks", {}))
     checks["weaviate"] = {"ok": True, "meta": meta}
-
     return {"checks": checks}
+
 
 def postgres_check_node(state: HealthcheckState) -> HealthcheckState:
     try:
@@ -56,15 +78,14 @@ def postgres_check_node(state: HealthcheckState) -> HealthcheckState:
             with conn.cursor() as cur:
                 cur.execute("select 1;")
                 cur.fetchone()
-
         result = {"ok": True}
     except Exception as e:
         result = {"ok": False, "error": str(e)}
 
     checks = dict(state.get("checks", {}))
     checks["postgres"] = result
-
     return {"checks": checks}
+
 
 def redis_check_node(state: HealthcheckState) -> HealthcheckState:
     try:
@@ -78,40 +99,51 @@ def redis_check_node(state: HealthcheckState) -> HealthcheckState:
     checks["redis"] = result
     return {"checks": checks}
 
+
+# ----------------------------
+# Reporting
+# ----------------------------
+
 def report_node(state: HealthcheckState) -> HealthcheckState:
-    # Build a simple human-readable report from the current state.
     plan = state.get("plan", [])
     report_lines = [f"Goal: {state.get('goal', '(none)')}", "Plan:"]
     report_lines += [f"  {i}. {step}" for i, step in enumerate(plan, 1)]
 
-    # 👇 NEW PART: read what previous nodes added to state
     checks = state.get("checks", {})
     report_lines.append("Checks:")
-    report_lines.append(
-        f"  weaviate: {'present' if 'weaviate' in checks else 'missing'}"
-    )
-    report_lines.append(
-    f"  postgres: {'ok' if checks.get('postgres', {}).get('ok') else 'failed'}"
-    )
-    rd = checks.get("redis", {})
 
+    # weaviate
+    if "weaviate" not in checks:
+        report_lines.append("  weaviate: skipped")
+    else:
+        report_lines.append("  weaviate: ok")
 
-    if rd.get("ok"):
+    # postgres
+    pg = checks.get("postgres")
+    if pg is None:
+        report_lines.append("  postgres: skipped")
+    elif pg.get("ok"):
+        report_lines.append("  postgres: ok")
+    else:
+        report_lines.append(f"  postgres: failed ({pg.get('error', 'no error captured')})")
+
+    # redis (keep special error capture)
+    rd = checks.get("redis")
+    if rd is None:
+        report_lines.append("  redis: skipped")
+    elif rd.get("ok"):
         report_lines.append("  redis: ok")
     else:
         report_lines.append(f"  redis: failed ({rd.get('error', 'no error captured')})")
-    
-    # Show that routing consumed the plan dynamically
+
     report_lines.append(f"Remaining todo: {state.get('todo', [])}")
 
     return {"report": "\n".join(report_lines)}
 
-def route_from_router(state: HealthcheckState) -> str:
-    current = state.get("current", "")
-    if current in ("weaviate", "postgres", "redis"):
-        return current
-    return "done"
 
+# ----------------------------
+# Graph build
+# ----------------------------
 
 def build_graph():
     g = StateGraph(HealthcheckState)
@@ -122,13 +154,12 @@ def build_graph():
     g.add_node("weaviate", weaviate_check_node)
     g.add_node("postgres", postgres_check_node)
     g.add_node("redis", redis_check_node)
-    
+
     g.add_node("report", report_node)
 
     g.add_edge(START, "plan")
     g.add_edge("plan", "router")
 
-    # Conditional routing from router → specific check OR done
     g.add_conditional_edges(
         "router",
         route_from_router,
@@ -136,22 +167,34 @@ def build_graph():
             "weaviate": "weaviate",
             "postgres": "postgres",
             "redis": "redis",
-            "done": "report"
-        }
+            "done": "report",
+        },
     )
 
-    # After each check, go back to router (loop)
     g.add_edge("weaviate", "router")
     g.add_edge("postgres", "router")
     g.add_edge("redis", "router")
-    
+
     g.add_edge("report", END)
 
     return g.compile()
 
 
+# ----------------------------
+# Entrypoint
+# ----------------------------
+
 if __name__ == "__main__":
     args = parse_args()
     graph = build_graph()
-    final_state = graph.invoke({"goal": "Verify devcontainer services"})
-    print(final_state["report"])
+
+    initial_state: HealthcheckState = {
+        "goal": "Verify devcontainer services",
+        "cli": {
+            "only": args.only,
+            "skip": args.skip,
+        },
+    }
+
+    result = graph.invoke(initial_state)
+    print(result["report"])

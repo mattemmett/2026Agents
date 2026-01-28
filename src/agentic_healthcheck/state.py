@@ -1,10 +1,12 @@
-from typing import TypedDict, Dict, List, Any
+from typing import TypedDict, Dict, List, Any, Optional
 
 
 class HealthcheckState(TypedDict, total=False):
     goal: str
     plan: List[str]
-    todo: List[str]        # NEW: remaining checks to run
-    current: str           # NEW: which check we’re about to run
+    todo: List[str]
+    current: str
     checks: Dict[str, Any]
     report: str
+    cli: Dict[str, Optional[str]]
+    attempts: dict[str, int]
