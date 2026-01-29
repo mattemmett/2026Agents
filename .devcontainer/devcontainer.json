@@ -9,6 +9,12 @@
 
   "postCreateCommand": "pip install -r requirements.txt",
 
+  "remoteEnv": {
+    "LLM_API_KEY": "${localEnv:LLM_API_KEY}",
+    "LLM_BASE_URL": "${localEnv:LLM_BASE_URL}",
+    "LLM_MODEL": "${localEnv:LLM_MODEL}"
+  },
+
   "customizations": {
     "vscode": {
       "extensions": [
