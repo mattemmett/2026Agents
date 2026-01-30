@@ -38,5 +38,15 @@ def parse_args():
         action="store_true",
         help="Automatically approve the plan (useful for CI)",
     )
+    p.add_argument(
+        "--edit-plan",
+        action="store_true",
+        help="Before approval, allow editing the todo list (comma-separated).",
+    )
+    p.add_argument(
+        "--edit-default",
+        default=None,
+        help="Optional default edit value (comma-separated). Useful for quick testing.",
+    )
 
     return p.parse_args()

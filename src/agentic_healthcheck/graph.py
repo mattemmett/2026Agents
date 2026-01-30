@@ -175,11 +175,15 @@ def approval_gate_node(state: HealthcheckState) -> HealthcheckState:
     Behavior:
       - If approval not required: auto-approve.
       - If auto-approve set: approve and continue.
-      - Else: prompt in CLI.
+      - Else:
+          - optionally allow editing the todo (if --edit-plan)
+          - then prompt for approval
     """
     cli = state.get("cli", {}) or {}
     require = bool(cli.get("require_approval", False))
     auto = bool(cli.get("auto_approve", False))
+    edit_plan = bool(cli.get("edit_plan", False))
+    edit_default = cli.get("edit_default")
 
     # Default: no approval needed
     if not require:
@@ -197,12 +201,54 @@ def approval_gate_node(state: HealthcheckState) -> HealthcheckState:
             "approval_reason": "auto_approve",
         }
 
-    # Interactive approval prompt
-    plan = state.get("plan", [])
+    # Interactive flow (optional edit, then approve)
     source = state.get("planning_source", "unknown")
+    todo = list(state.get("todo", []))
+    plan = list(state.get("plan", []))
+
+    edited = False
+    edit_error = None
+
+    if edit_plan:
+        print("\n--- EDIT PLAN (optional) ---")
+        print(f"Allowed checks: {', '.join(ALLOWED_CHECKS)}")
+        print(f"Current todo: {', '.join(todo) if todo else '(empty)'}")
+
+        raw = input("Edit todo (comma-separated) or press Enter to keep: ").strip()
+
+        # Optional: if user hits Enter, but you provided --edit-default (testing)
+        if not raw and edit_default:
+            raw = edit_default.strip()
+
+        if raw:
+            proposed = [x.strip() for x in raw.split(",") if x.strip()]
+            cleaned: list[str] = []
+            invalid: list[str] = []
+
+            for item in proposed:
+                if item not in ALLOWED_CHECKS:
+                    invalid.append(item)
+                    continue
+                if item not in cleaned:
+                    cleaned.append(item)
+
+            if cleaned:
+                todo = cleaned
+                plan = [f"Check {c.capitalize()}" for c in todo] + ["Summarize results"]
+                edited = True
+                if invalid:
+                    edit_error = f"ignored_invalid={invalid}"
+            else:
+                # If they entered only invalid values, keep existing todo
+                edit_error = f"edit_rejected_all_invalid={invalid or proposed}"
 
     print("\n--- HUMAN APPROVAL REQUIRED ---")
     print(f"Planning source: {source}")
+    if edited:
+        print("Plan was edited by human before approval.")
+    if edit_error:
+        print(f"Edit note: {edit_error}")
+
     print("Proposed plan:")
     for i, step in enumerate(plan, 1):
         print(f"  {i}. {step}")
@@ -210,11 +256,26 @@ def approval_gate_node(state: HealthcheckState) -> HealthcheckState:
     resp = input("Approve this plan? [y/N]: ").strip().lower()
     approved = resp in ("y", "yes")
 
-    return {
+    reason = "user_approved" if approved else "user_denied"
+    if edited and approved:
+        reason = "user_edited_then_approved"
+    elif edited and not approved:
+        reason = "user_edited_then_denied"
+
+    out: HealthcheckState = {
         "approval_required": True,
         "approved": approved,
-        "approval_reason": "user_approved" if approved else "user_denied",
+        "approval_reason": reason,
+        # If edited, persist the edited plan into state so execution matches what was approved
+        "todo": todo,
+        "plan": plan,
     }
+
+    # Optional: keep this for report/debug visibility
+    if edit_error:
+        out["approval_edit_note"] = edit_error  # you'll add this to state.py if you want to type it
+
+    return out
 
 
 def route_from_approval(state: HealthcheckState) -> str:
@@ -342,6 +403,7 @@ def report_node(state: HealthcheckState) -> HealthcheckState:
     source = state.get("planning_source", "unknown")
     report_lines.append(f"Planning source: {source}")
 
+    # HITL status    
     if state.get("approval_required"):
         report_lines.append(
             f"Approval: {state.get('approval_reason')} (approved={state.get('approved')})"
@@ -349,6 +411,12 @@ def report_node(state: HealthcheckState) -> HealthcheckState:
     elif state.get("approved") is not None:
         report_lines.append(f"Approval: {state.get('approval_reason')}")
 
+    # If approved, show final todo
+    approved = state.get("approved")
+    todo = state.get("todo")
+    if approved and todo is not None:
+        report_lines.append(f"Final approved todo: {todo}")
+    
     if source == "llm":
         report_lines.append(f"LLM validated todo: {state.get('llm_plan_validated')}")
     else:
@@ -466,6 +534,8 @@ if __name__ == "__main__":
             "debug_plan": getattr(args, "debug_plan", False),
             "require_approval": getattr(args, "require_approval", False),
             "auto_approve": getattr(args, "auto_approve", False),
+            "edit_plan": getattr(args, "edit_plan", False),
+            "edit_default": getattr(args, "edit_default", None),
         },
         "attempts": {},
         "checks": {},

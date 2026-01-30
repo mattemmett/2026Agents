@@ -19,6 +19,10 @@ This project is intentionally structured as a **learning journal** for agentic a
   - `approved`
   - `approval_reason`
 - Report now explicitly includes approval outcome alongside planning source
+### Follow-up: Editable plan + approved execution visibility
+- Added optional **editable todo** step before approval (`--edit-plan`)
+- Added `--edit-default` to make testing edits quick without typing
+- Report now prints the **Final approved todo** so it’s obvious what will execute (or executed)
 
 ### Why this exists
 This milestone demonstrates a core agentic safety pattern:
