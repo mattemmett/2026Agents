@@ -161,8 +161,6 @@ def plan_node(state: HealthcheckState) -> HealthcheckState:
         "plan": [f"Check {c.capitalize()}" for c in plan] + ["Summarize results"],
         "todo": plan,
         "planning_source": planning_source,
-
-        # 3.2: planner observability (stored in state)
         "llm_plan_raw": llm_plan_raw,
         "llm_plan_parsed": llm_plan_parsed,
         "llm_plan_validated": llm_plan_validated,
@@ -171,10 +169,32 @@ def plan_node(state: HealthcheckState) -> HealthcheckState:
 
 
 # ----------------------------
-# Routing + retries
+# Supervisor + Worker orchestration
 # ----------------------------
 
-def router_node(state: HealthcheckState) -> HealthcheckState:
+MAX_ATTEMPTS = 3
+BACKOFF_SECONDS = 0.25
+
+
+def bump_attempts(state: HealthcheckState, name: str) -> Dict[str, int]:
+    attempts = dict(state.get("attempts", {}))
+    attempts[name] = attempts.get(name, 0) + 1
+    return attempts
+
+
+def merge_check(state: HealthcheckState, name: str, result: dict, attempts: Dict[str, int]) -> HealthcheckState:
+    checks = dict(state.get("checks", {}))
+    checks[name] = result
+    return {"checks": checks, "attempts": attempts}
+
+
+def supervisor_node(state: HealthcheckState) -> HealthcheckState:
+    """
+    Supervisor owns the task loop:
+      - picks next task from todo
+      - sets current
+      - no direct tool calls
+    """
     todo = list(state.get("todo", []))
     if not todo:
         return {"current": ""}
@@ -183,11 +203,14 @@ def router_node(state: HealthcheckState) -> HealthcheckState:
     return {"current": current, "todo": todo}
 
 
-MAX_ATTEMPTS = 3
-BACKOFF_SECONDS = 0.25
+def route_from_supervisor(state: HealthcheckState) -> str:
+    """
+    Supervisor decides where to go next:
+      - to a worker ("weaviate"/"postgres"/"redis")
+      - or to report ("done")
 
-
-def route_from_router(state: HealthcheckState) -> str:
+    Also handles retry decision if a worker failed and attempts remain.
+    """
     current = state.get("current", "")
     if current not in ("weaviate", "postgres", "redis"):
         return "done"
@@ -196,6 +219,8 @@ def route_from_router(state: HealthcheckState) -> str:
     attempts = state.get("attempts", {})
 
     result = checks.get(current)
+
+    # If we already ran it and it failed, retry while under cap.
     if result and not result.get("ok", False):
         if attempts.get(current, 0) < MAX_ATTEMPTS:
             time.sleep(BACKOFF_SECONDS)
@@ -204,23 +229,11 @@ def route_from_router(state: HealthcheckState) -> str:
     return current
 
 
-def bump_attempts(state: HealthcheckState, name: str) -> dict:
-    attempts = dict(state.get("attempts", {}))
-    attempts[name] = attempts.get(name, 0) + 1
-    return attempts
-
-
-def merge_check(state: HealthcheckState, name: str, result: dict, attempts: dict) -> HealthcheckState:
-    checks = dict(state.get("checks", {}))
-    checks[name] = result
-    return {"checks": checks, "attempts": attempts}
-
-
 # ----------------------------
-# Check nodes
+# Worker nodes (pure tool execution)
 # ----------------------------
 
-def weaviate_check_node(state: HealthcheckState) -> HealthcheckState:
+def weaviate_worker(state: HealthcheckState) -> HealthcheckState:
     attempts = bump_attempts(state, "weaviate")
     try:
         resp = requests.get("http://weaviate:8080/v1/meta", timeout=3)
@@ -232,7 +245,7 @@ def weaviate_check_node(state: HealthcheckState) -> HealthcheckState:
     return merge_check(state, "weaviate", result, attempts)
 
 
-def postgres_check_node(state: HealthcheckState) -> HealthcheckState:
+def postgres_worker(state: HealthcheckState) -> HealthcheckState:
     attempts = bump_attempts(state, "postgres")
     try:
         with psycopg.connect(
@@ -251,7 +264,7 @@ def postgres_check_node(state: HealthcheckState) -> HealthcheckState:
     return merge_check(state, "postgres", result, attempts)
 
 
-def redis_check_node(state: HealthcheckState) -> HealthcheckState:
+def redis_worker(state: HealthcheckState) -> HealthcheckState:
     attempts = bump_attempts(state, "redis")
     try:
         r = redis.Redis(host="redis", port=6379, socket_connect_timeout=2, socket_timeout=2)
@@ -276,14 +289,12 @@ def report_node(state: HealthcheckState) -> HealthcheckState:
     source = state.get("planning_source", "unknown")
     report_lines.append(f"Planning source: {source}")
 
-    # 3.2: show planner observability (compact)
     if source == "llm":
         report_lines.append(f"LLM validated todo: {state.get('llm_plan_validated')}")
     else:
         if state.get("llm_plan_raw") is not None:
             report_lines.append(f"LLM plan rejected: {state.get('llm_plan_error')}")
 
-    # Debug-only: show raw + parsed
     if debug_plan and state.get("llm_plan_raw") is not None:
         raw = state.get("llm_plan_raw") or ""
         raw_trunc = raw if len(raw) <= 500 else raw[:500] + "…(truncated)"
@@ -329,20 +340,21 @@ def build_graph():
     g = StateGraph(HealthcheckState)
 
     g.add_node("plan", plan_node)
-    g.add_node("router", router_node)
 
-    g.add_node("weaviate", weaviate_check_node)
-    g.add_node("postgres", postgres_check_node)
-    g.add_node("redis", redis_check_node)
+    # Supervisor/worker structure
+    g.add_node("supervisor", supervisor_node)
+    g.add_node("weaviate", weaviate_worker)
+    g.add_node("postgres", postgres_worker)
+    g.add_node("redis", redis_worker)
 
     g.add_node("report", report_node)
 
     g.add_edge(START, "plan")
-    g.add_edge("plan", "router")
+    g.add_edge("plan", "supervisor")
 
     g.add_conditional_edges(
-        "router",
-        route_from_router,
+        "supervisor",
+        route_from_supervisor,
         {
             "weaviate": "weaviate",
             "postgres": "postgres",
@@ -351,9 +363,10 @@ def build_graph():
         },
     )
 
-    g.add_edge("weaviate", "router")
-    g.add_edge("postgres", "router")
-    g.add_edge("redis", "router")
+    # Workers report back to supervisor only
+    g.add_edge("weaviate", "supervisor")
+    g.add_edge("postgres", "supervisor")
+    g.add_edge("redis", "supervisor")
 
     g.add_edge("report", END)
 
@@ -374,7 +387,7 @@ if __name__ == "__main__":
             "only": args.only,
             "skip": args.skip,
             "llm_plan": args.llm_plan,
-            "debug_plan": args.debug_plan,
+            "debug_plan": getattr(args, "debug_plan", False),
         },
         "attempts": {},
         "checks": {},
