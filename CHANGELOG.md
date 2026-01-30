@@ -5,6 +5,31 @@ This project is intentionally structured as a **learning journal** for agentic a
 
 ---
 
+## v0.4 – Supervisor–Worker Sub-Agents (Hub-and-Spoke)
+
+### What changed
+- Refactored the healthcheck into an explicit **supervisor–worker** architecture:
+  - `supervisor_node` owns the task loop and sets `current`
+  - `route_from_supervisor` routes to the correct worker or terminates
+  - worker nodes (`weaviate_worker`, `postgres_worker`, `redis_worker`) perform only tool execution and return results
+- Generalized retries across all checks using:
+  - `attempts` tracking in state
+  - `MAX_ATTEMPTS` cap
+  - `BACKOFF_SECONDS` delay
+- Preserved constrained LLM planning from v0.3, now used as an optional planner feeding the supervisor’s todo list
+- Improved reporting to include per-check attempt counts and planning source
+
+### Why this exists
+This milestone demonstrates a production-aligned agent architecture:
+
+> **Supervisors decide. Workers execute. State is the contract.**
+
+This pattern sets the foundation for:
+- human-in-the-loop approval gates
+- tool-selection routing under constraints
+- parallel worker fan-out
+- persisted/resumable workflows
+
 ## v0.3 – Constrained LLM Planner with Observability
 **Commit:** `feat(agentic): add constrained LLM planner with observability`
 
