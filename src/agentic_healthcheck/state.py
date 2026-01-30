@@ -21,16 +21,23 @@ class HealthcheckState(TypedDict, total=False):
     # ----------------------------
     # LLM planner observability (3.2)
     # ----------------------------
-    llm_plan_raw: str | None           # raw model output (text)
-    llm_plan_parsed: Dict[str, Any] | None  # json.loads result
-    llm_plan_validated: List[str] | None    # allowlisted todo we accepted
-    llm_plan_error: str | None         # why plan was rejected
+    llm_plan_raw: str | None               # raw model output (text)
+    llm_plan_parsed: Dict[str, Any] | None # json.loads result
+    llm_plan_validated: List[str] | None   # allowlisted todo we accepted
+    llm_plan_error: str | None             # why plan was rejected
 
     # ----------------------------
     # Execution results
     # ----------------------------
     checks: Dict[str, Any]      # per-check results
-    attempts: Dict[str, int]   # retry counters
+    attempts: Dict[str, int]    # retry counters
+
+    # ----------------------------
+    # Human-in-the-loop (approval gate)
+    # ----------------------------
+    approval_required: bool         # whether HITL gate is enabled for this run
+    approved: bool | None           # None = not decided yet, True/False = decision
+    approval_reason: str | None     # audit note ("auto", "user approved", "user denied")
 
     # ----------------------------
     # Final output

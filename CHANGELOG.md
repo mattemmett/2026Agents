@@ -5,6 +5,36 @@ This project is intentionally structured as a **learning journal** for agentic a
 
 ---
 
+## v0.5 – Human-in-the-Loop Approval Gate (CLI)
+
+### What changed
+- Added a **Human-in-the-Loop (HITL) approval gate** between planning and execution:
+  - `plan → approval_gate → supervisor/workers`
+  - denial path cleanly exits via `approval_gate → report`
+- Introduced CLI controls:
+  - `--require-approval` to pause execution pending human approval
+  - `--auto-approve` to bypass the prompt (CI / non-interactive runs)
+- Extended graph state with approval observability:
+  - `approval_required`
+  - `approved`
+  - `approval_reason`
+- Report now explicitly includes approval outcome alongside planning source
+
+### Why this exists
+This milestone demonstrates a core agentic safety pattern:
+
+> **Planning does not imply permission to act.**
+
+Execution is now:
+- explicitly gated
+- auditable
+- compatible with both human review and automated pipelines
+
+This pattern is foundational for:
+- change management workflows
+- deployment approvals
+- escalation-aware autonomous systems
+
 ## v0.4 – Supervisor–Worker Sub-Agents (Hub-and-Spoke)
 
 ### What changed

@@ -167,6 +167,59 @@ def plan_node(state: HealthcheckState) -> HealthcheckState:
         "llm_plan_error": llm_plan_error,
     }
 
+def approval_gate_node(state: HealthcheckState) -> HealthcheckState:
+    """
+    Human-in-the-loop approval gate.
+    Runs AFTER planning, BEFORE any execution.
+
+    Behavior:
+      - If approval not required: auto-approve.
+      - If auto-approve set: approve and continue.
+      - Else: prompt in CLI.
+    """
+    cli = state.get("cli", {}) or {}
+    require = bool(cli.get("require_approval", False))
+    auto = bool(cli.get("auto_approve", False))
+
+    # Default: no approval needed
+    if not require:
+        return {
+            "approval_required": False,
+            "approved": True,
+            "approval_reason": "not_required",
+        }
+
+    # Approval required, but auto-approved (CI / non-interactive)
+    if auto:
+        return {
+            "approval_required": True,
+            "approved": True,
+            "approval_reason": "auto_approve",
+        }
+
+    # Interactive approval prompt
+    plan = state.get("plan", [])
+    source = state.get("planning_source", "unknown")
+
+    print("\n--- HUMAN APPROVAL REQUIRED ---")
+    print(f"Planning source: {source}")
+    print("Proposed plan:")
+    for i, step in enumerate(plan, 1):
+        print(f"  {i}. {step}")
+
+    resp = input("Approve this plan? [y/N]: ").strip().lower()
+    approved = resp in ("y", "yes")
+
+    return {
+        "approval_required": True,
+        "approved": approved,
+        "approval_reason": "user_approved" if approved else "user_denied",
+    }
+
+
+def route_from_approval(state: HealthcheckState) -> str:
+    return "approved" if state.get("approved") else "denied"
+
 
 # ----------------------------
 # Supervisor + Worker orchestration
@@ -289,6 +342,13 @@ def report_node(state: HealthcheckState) -> HealthcheckState:
     source = state.get("planning_source", "unknown")
     report_lines.append(f"Planning source: {source}")
 
+    if state.get("approval_required"):
+        report_lines.append(
+            f"Approval: {state.get('approval_reason')} (approved={state.get('approved')})"
+        )
+    elif state.get("approved") is not None:
+        report_lines.append(f"Approval: {state.get('approval_reason')}")
+
     if source == "llm":
         report_lines.append(f"LLM validated todo: {state.get('llm_plan_validated')}")
     else:
@@ -339,7 +399,11 @@ def report_node(state: HealthcheckState) -> HealthcheckState:
 def build_graph():
     g = StateGraph(HealthcheckState)
 
+    # --- Planning ---
     g.add_node("plan", plan_node)
+
+    # --- Human-in-the-loop approval ---
+    g.add_node("approval_gate", approval_gate_node)
 
     # Supervisor/worker structure
     g.add_node("supervisor", supervisor_node)
@@ -347,11 +411,23 @@ def build_graph():
     g.add_node("postgres", postgres_worker)
     g.add_node("redis", redis_worker)
 
+    #-- Reporting ---
     g.add_node("report", report_node)
 
     g.add_edge(START, "plan")
-    g.add_edge("plan", "supervisor")
+    g.add_edge("plan", "approval_gate")
 
+    # Approval gate routes either to supervisor or straight to report
+    g.add_conditional_edges(
+        "approval_gate",
+        route_from_approval,
+        {
+            "approved": "supervisor",
+            "denied": "report",
+        },
+    )
+
+    # Supervisor routes to workers or report
     g.add_conditional_edges(
         "supervisor",
         route_from_supervisor,
@@ -388,9 +464,14 @@ if __name__ == "__main__":
             "skip": args.skip,
             "llm_plan": args.llm_plan,
             "debug_plan": getattr(args, "debug_plan", False),
+            "require_approval": getattr(args, "require_approval", False),
+            "auto_approve": getattr(args, "auto_approve", False),
         },
         "attempts": {},
         "checks": {},
+        "approval_required": False,
+        "approved": None,
+        "approval_reason": None,
     }
 
     result = graph.invoke(initial_state)
